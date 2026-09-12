@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>下课三张纸 · 课堂笔记结构化</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&family=ZCOOL+XiaoWei&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="mast">
+      <div class="mast-left">
+        <p class="seal">交大新生 · 课间用</p>
+        <h1>下课三张纸</h1>
+        <p class="lede">同一段笔记，做成三件不同的事：给自己看、考自己、讲给别人听。</p>
+      </div>
+      <button type="button" class="archive-btn" id="archiveToggle" aria-expanded="false">
+        本周存档 <span id="archiveCount">0</span>
+      </button>
+    </header>
+
+    <aside class="archive" id="archivePanel" hidden>
+      <div class="archive-head">
+        <h2>本周存档</h2>
+        <button type="button" class="text-btn" id="archiveClose">收起</button>
+      </div>
+      <ul id="archiveList" class="archive-list"></ul>
+    </aside>
+
+    <div class="studio">
+      <section class="inbox">
+        <div class="inbox-head">
+          <h2>把笔记扔进来</h2>
+          <p>可以打字、拍板书，或对着麦克风讲。三种纸会同时出来。</p>
+        </div>
+        <div class="samples" id="sampleBar"></div>
+        <div class="capture-bar">
+          <button type="button" class="capture" id="shotBtn">拍照识板书</button>
+          <button type="button" class="capture" id="albumBtn">导入照片</button>
+          <button type="button" class="capture" id="talkBtn" aria-pressed="false">口述笔记</button>
+          <button type="button" class="capture" id="audioFileBtn">导入音频</button>
+        </div>
+        <input id="shotInput" hidden type="file" accept="image/*" capture="environment">
+        <input id="albumInput" hidden type="file" accept="image/*">
+        <input id="audioInput" hidden type="file" accept="audio/*">
+        <div class="capture-status" id="captureStatus" hidden></div>
+        <div class="clip-row" id="clipRow" hidden></div>
+        <label class="sr-only" for="noteInput">课堂笔记</label>
+        <textarea id="noteInput" rows="12" placeholder="下课把板书、疑问打在这里；也可以拍照或口述……"></textarea>
+        <div class="inbox-actions">
+          <label class="title-field">
+            <span>这节课叫</span>
+            <input type="text" id="noteTitle" maxlength="32" placeholder="例如：高数 · 导数">
+          </label>
+          <button type="button" class="primary" id="makeBtn">做成三张纸</button>
+        </div>
+      </section>
+
+      <section class="desk" id="desk" data-empty="true">
+        <p class="desk-hint" id="deskHint">左边放进笔记，三张纸会出现在这张桌上：复习卡、考卷、口播稿。</p>
+
+        <article class="sheet sheet-cards" id="sheetCards" hidden>
+          <header class="sheet-head">
+            <span class="sheet-mark">看</span>
+            <div>
+              <h3>复习卡</h3>
+              <p>留给自己事后翻</p>
+            </div>
+          </header>
+          <div class="card-cols">
+            <section>
+              <h4>知识点</h4>
+              <ul id="knowList"></ul>
+            </section>
+            <section>
+              <h4>公式 / 定义</h4>
+              <ul id="formulaList"></ul>
+            </section>
+            <section>
+              <h4>当时的疑问</h4>
+              <ul id="doubtList"></ul>
+            </section>
+          </div>
+        </article>
+
+        <article class="sheet sheet-quiz" id="sheetQuiz" hidden>
+          <header class="sheet-head">
+            <span class="sheet-mark">考</span>
+            <div>
+              <h3>三道自测</h3>
+              <p>当场核对，不是再读一遍卡片</p>
+            </div>
+            <p class="score" id="quizScore">0 / 3</p>
+          </header>
+          <ol class="quiz" id="quizList"></ol>
+        </article>
+
+        <article class="sheet sheet-script" id="sheetScript" hidden>
+          <header class="sheet-head">
+            <span class="sheet-mark">讲</span>
+            <div>
+              <h3>60 秒复述稿</h3>
+              <p>读给室友听，计时开始</p>
+            </div>
+            <div class="timer-wrap">
+              <button type="button" class="ghost" id="timerBtn">开始 60 秒</button>
+              <span class="timer" id="timerReadout" aria-live="polite">1:00</span>
+            </div>
+          </header>
+          <div class="script-body">
+            <p class="script-kicker" id="scriptKicker"></p>
+            <div id="scriptLines" class="script-lines"></div>
+            <p class="script-close" id="scriptClose"></p>
+          </div>
+          <button type="button" class="ghost" id="copyScriptBtn">复制口播稿</button>
+        </article>
+
+        <div class="desk-foot" id="deskFoot" hidden>
+          <button type="button" class="primary" id="saveBtn">存进本周</button>
+          <p class="save-msg" id="saveMsg" hidden>已写入本周存档</p>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script src="js/app.js"></script>
+</body>
+</html>
