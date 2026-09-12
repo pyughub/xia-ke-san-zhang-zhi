@@ -232,6 +232,7 @@
     recognition: null,
     ocrBusy: false,
     ocrWorker: null,
+    paddleOcr: null,
     mediaRecorder: null,
     audioStream: null,
     audioChunks: []
@@ -903,12 +904,8 @@
       els.ocrEngine.classList.remove('is-warn');
       return;
     }
-    els.ocrEngine.classList.add('is-warn');
-    if (reason === 'https') {
-      els.ocrEngine.textContent = '拍照识别：HTTPS 页面调不到本机 Umi-OCR。请先打开 Umi-OCR，再用本地 http 打开本页。';
-    } else {
-      els.ocrEngine.textContent = '拍照识别：未接上 Umi-OCR。请先打开 Umi-OCR（端口 1224），再用本机 http 打开本页。';
-    }
+    els.ocrEngine.textContent = '拍照识别：网页内 PaddleOCR（与 Umi-OCR 同款引擎）';
+    els.ocrEngine.classList.remove('is-warn');
   }
 
   function probeUmi(done) {
@@ -1033,6 +1030,95 @@
     });
   }
 
+  function loadScriptOnce(src, done) {
+    var existing = document.querySelector('script[data-ocr-src="' + src + '"]');
+    if (existing) {
+      if (existing.getAttribute('data-ocr-ready') === '1') done();
+      else existing.addEventListener('load', function () { done(); }, { once: true });
+      existing.addEventListener('error', function () { done(new Error('load')); }, { once: true });
+      return;
+    }
+    var script = document.createElement('script');
+    script.src = absUrl(src);
+    script.async = true;
+    script.setAttribute('data-ocr-src', src);
+    script.onload = function () {
+      script.setAttribute('data-ocr-ready', '1');
+      done();
+    };
+    script.onerror = function () { done(new Error('load')); };
+    document.head.appendChild(script);
+  }
+
+  function textFromPaddle(lines) {
+    if (!lines || !lines.length) return '';
+    var kept = [];
+    var i;
+    for (i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!line || !line.text) continue;
+      if (line.score != null && line.score < 0.45) continue;
+      kept.push(line);
+    }
+    kept.sort(function (a, b) {
+      var ay = a.frame ? a.frame.top : 0;
+      var by = b.frame ? b.frame.top : 0;
+      if (Math.abs(ay - by) > 14) return ay - by;
+      var ax = a.frame ? a.frame.left : 0;
+      var bx = b.frame ? b.frame.left : 0;
+      return ax - bx;
+    });
+    return tidyOcr(kept.map(function (line) { return line.text; }).join('\n'));
+  }
+
+  function ensurePaddle(done) {
+    if (state.paddleOcr) {
+      done(null, state.paddleOcr);
+      return;
+    }
+    setCaptureStatus('正在加载中文识别模型，第一次会稍慢…');
+    loadScriptOnce('vendor/paddle/ort.wasm.min.js', function (err) {
+      if (err || !window.ort) {
+        done(err || new Error('ort'));
+        return;
+      }
+      loadScriptOnce('vendor/paddle/guten-ocr.js', function (err2) {
+        if (err2 || !window.PaddleOcr || !window.PaddleOcr.create) {
+          done(err2 || new Error('paddle'));
+          return;
+        }
+        var base = absUrl('vendor/paddle/');
+        if (base.charAt(base.length - 1) !== '/') base += '/';
+        window.PaddleOcr.create(base).then(function (ocr) {
+          state.paddleOcr = ocr;
+          done(null, ocr);
+        }).catch(function (e) {
+          done(e || new Error('paddle'));
+        });
+      });
+    });
+  }
+
+  function recognizePaddle(file, done) {
+    ensurePaddle(function (err, ocr) {
+      if (err || !ocr) {
+        done(err || new Error('paddle'));
+        return;
+      }
+      setCaptureStatus('正在用网页内 PaddleOCR 识别…');
+      shrinkForUmi(file, function (blob) {
+        var url = URL.createObjectURL(blob);
+        ocr.detect(url).then(function (lines) {
+          URL.revokeObjectURL(url);
+          done(null, textFromPaddle(lines));
+        }).catch(function (e) {
+          URL.revokeObjectURL(url);
+          done(e || new Error('detect'));
+        });
+      });
+    });
+  }
+
   function recognizeUmi(file, done) {
     shrinkForUmi(file, function (blob) {
       blobToBase64(blob, function (b64) {
@@ -1073,24 +1159,33 @@
     els.albumBtn.disabled = true;
     var preview = URL.createObjectURL(file);
     addClip('image', file, preview);
-    setCaptureStatus('正在查找本机 Umi-OCR…');
+    setCaptureStatus('正在准备识别…');
     probeUmi(function (ok, reason) {
       paintOcrEngine(ok, reason);
       if (ok) {
         setCaptureStatus('正在用本机 Umi-OCR 识别…');
         recognizeUmi(file, function (err, text) {
-          if (err) {
-            recognizeTesseract(file, 'Umi-OCR 这次没认出，改用备用识别。');
+          if (!err) {
+            finishOcr(text);
             return;
           }
-          finishOcr(text);
+          recognizePaddle(file, function (err2, text2) {
+            if (!err2) {
+              finishOcr(text2, 'Umi 没认出，已改用网页识别。');
+              return;
+            }
+            recognizeTesseract(file, '网页识别失败，暂用备用识别。');
+          });
         });
         return;
       }
-      var prefix = reason === 'https' ?
-        'HTTPS 页面调不到本机 Umi-OCR，暂用备用识别。' :
-        '未接上本机 Umi-OCR，暂用备用识别。';
-      recognizeTesseract(file, prefix);
+      recognizePaddle(file, function (err, text) {
+        if (!err) {
+          finishOcr(text);
+          return;
+        }
+        recognizeTesseract(file, '网页识别没加载成功，暂用备用识别。');
+      });
     });
   }
 
