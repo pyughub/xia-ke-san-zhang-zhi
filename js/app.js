@@ -699,27 +699,195 @@
     tryNext();
   }
 
-  function downscaleImage(file, maxEdge, done) {
+  function loadPhotoViaImg(file, done) {
     var url = URL.createObjectURL(file);
     var img = new Image();
     img.onload = function () {
-      var width = img.width;
-      var height = img.height;
-      var scale = Math.min(1, maxEdge / Math.max(width, height));
-      var canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(width * scale));
-      canvas.height = Math.max(1, Math.round(height * scale));
-      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
-      canvas.toBlob(function (blob) {
-        done(blob || file);
-      }, 'image/jpeg', 0.86);
+      done(img, img.naturalWidth || img.width, img.naturalHeight || img.height, function () {});
     };
     img.onerror = function () {
       URL.revokeObjectURL(url);
-      done(file);
+      done(null, 0, 0, function () {});
     };
     img.src = url;
+  }
+
+  function loadPhotoSource(file, done) {
+    if (typeof createImageBitmap !== 'function') {
+      loadPhotoViaImg(file, done);
+      return;
+    }
+    var opts = { imageOrientation: 'from-image' };
+    createImageBitmap(file, opts).then(function (bmp) {
+      done(bmp, bmp.width, bmp.height, function () {
+        if (bmp.close) bmp.close();
+      });
+    }).catch(function () {
+      loadPhotoViaImg(file, done);
+    });
+  }
+
+  function targetScale(width, height) {
+    var maxEdge = Math.max(width, height);
+    if (maxEdge > 2400) return 2400 / maxEdge;
+    if (maxEdge < 1200) return Math.min(1600, maxEdge * 2) / maxEdge;
+    return 1;
+  }
+
+  function grayscaleAndMaybeInvert(data) {
+    var i;
+    var sum = 0;
+    var n = data.length / 4;
+    for (i = 0; i < data.length; i += 4) {
+      var y = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+      data[i] = data[i + 1] = data[i + 2] = y;
+      sum += y;
+    }
+    if (n && (sum / n) < 110) {
+      for (i = 0; i < data.length; i += 4) {
+        data[i] = data[i + 1] = data[i + 2] = 255 - data[i];
+      }
+    }
+  }
+
+  function stretchContrast(data) {
+    var hist = new Uint32Array(256);
+    var i;
+    var n = data.length / 4;
+    for (i = 0; i < data.length; i += 4) hist[data[i]]++;
+    var loCount = n * 0.01;
+    var hiCount = n * 0.99;
+    var acc = 0;
+    var lo = 0;
+    var hi = 255;
+    for (i = 0; i < 256; i++) {
+      acc += hist[i];
+      if (acc >= loCount) {
+        lo = i;
+        break;
+      }
+    }
+    acc = 0;
+    for (i = 0; i < 256; i++) {
+      acc += hist[i];
+      if (acc >= hiCount) {
+        hi = i;
+        break;
+      }
+    }
+    if (hi <= lo) return;
+    var scale = 255 / (hi - lo);
+    for (i = 0; i < data.length; i += 4) {
+      var y = Math.round((data[i] - lo) * scale);
+      if (y < 0) y = 0;
+      else if (y > 255) y = 255;
+      data[i] = data[i + 1] = data[i + 2] = y;
+    }
+  }
+
+  function sharpenGray(data, width, height) {
+    var copy = new Uint8ClampedArray(data);
+    var x;
+    var y;
+    var row = width * 4;
+    for (y = 1; y < height - 1; y++) {
+      for (x = 1; x < width - 1; x++) {
+        var i = y * row + x * 4;
+        var v = 5 * copy[i] - copy[i - 4] - copy[i + 4] - copy[i - row] - copy[i + row];
+        if (v < 0) v = 0;
+        else if (v > 255) v = 255;
+        data[i] = data[i + 1] = data[i + 2] = v;
+      }
+    }
+  }
+
+  function otsuBinarize(data) {
+    var hist = new Uint32Array(256);
+    var i;
+    var n = data.length / 4;
+    for (i = 0; i < data.length; i += 4) hist[data[i]]++;
+    var sum = 0;
+    for (i = 0; i < 256; i++) sum += i * hist[i];
+    var sumB = 0;
+    var wB = 0;
+    var max = 0;
+    var thresh = 127;
+    for (i = 0; i < 256; i++) {
+      wB += hist[i];
+      if (!wB) continue;
+      var wF = n - wB;
+      if (!wF) break;
+      sumB += i * hist[i];
+      var mB = sumB / wB;
+      var mF = (sum - sumB) / wF;
+      var between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > max) {
+        max = between;
+        thresh = i;
+      }
+    }
+    for (i = 0; i < data.length; i += 4) {
+      var v = data[i] > thresh ? 255 : 0;
+      data[i] = data[i + 1] = data[i + 2] = v;
+    }
+  }
+
+  function preprocessPhoto(file, done) {
+    loadPhotoSource(file, function (source, width, height, release) {
+      if (!source || !width || !height) {
+        release();
+        done(file);
+        return;
+      }
+      var scale = targetScale(width, height);
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      var ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+      release();
+      try {
+        var image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        grayscaleAndMaybeInvert(image.data);
+        stretchContrast(image.data);
+        sharpenGray(image.data, canvas.width, canvas.height);
+        otsuBinarize(image.data);
+        ctx.putImageData(image, 0, 0);
+      } catch (e) {}
+      if (canvas.toBlob) {
+        canvas.toBlob(function (blob) { done(blob || file); }, 'image/png');
+      } else {
+        done(file);
+      }
+    });
+  }
+
+  function textFromOcr(data) {
+    var lines = data && data.lines;
+    if (lines && lines.length) {
+      var kept = [];
+      var i;
+      for (i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (!line || !line.text) continue;
+        if (line.confidence != null && line.confidence < 40) continue;
+        kept.push(line.text);
+      }
+      if (kept.length) return tidyOcr(kept.join('\n'));
+    }
+    return tidyOcr(data && data.text);
+  }
+
+  function makeOcrWorker(options) {
+    return window.Tesseract.createWorker('chi_sim+eng', 1, options).catch(function () {
+      return window.Tesseract.createWorker('chi_sim', 1, options);
+    }).then(function (worker) {
+      return worker.setParameters({
+        tessedit_pageseg_mode: '6',
+        preserve_interword_spaces: '1'
+      }).then(function () { return worker; });
+    });
   }
 
   function readPhoto(file) {
@@ -733,7 +901,7 @@
     els.albumBtn.disabled = true;
     var preview = URL.createObjectURL(file);
     addClip('image', file, preview);
-    setCaptureStatus('正在识别板书上的字，第一次会下载字库，稍等片刻…');
+    setCaptureStatus('正在处理照片…');
     ensureTesseract(function (err) {
       if (err || !window.Tesseract) {
         state.ocrBusy = false;
@@ -742,7 +910,8 @@
         setCaptureStatus('识别库没加载成功。可检查网络，或把字打进输入框。', true);
         return;
       }
-      downscaleImage(file, 1600, function (blob) {
+      preprocessPhoto(file, function (blob) {
+        setCaptureStatus('正在识别板书…');
         var options = {
           workerPath: absUrl(OCR.workerPath),
           corePath: absUrl(OCR.corePath),
@@ -752,18 +921,18 @@
             if (msg.status === 'recognizing text' && msg.progress != null) {
               setCaptureStatus('正在识别板书… ' + Math.round(msg.progress * 100) + '%');
             } else if (msg.status && msg.status.indexOf('download') !== -1) {
-              setCaptureStatus('正在下载中文字库…');
+              setCaptureStatus('正在加载中英文字库…');
             }
           }
         };
         var ready = state.ocrWorker ?
           Promise.resolve(state.ocrWorker) :
-          window.Tesseract.createWorker('chi_sim', 1, options);
+          makeOcrWorker(options);
         ready.then(function (worker) {
           state.ocrWorker = worker;
-          return worker.recognize(blob);
+          return worker.recognize(blob, { rotateAuto: true });
         }).then(function (result) {
-          var text = tidyOcr(result && result.data ? result.data.text : '');
+          var text = textFromOcr(result && result.data);
           appendNote(text);
           setCaptureStatus(text && text.trim() ?
             '板书已写入输入框，认错的字可以直接改。' :
