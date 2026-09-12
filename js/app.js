@@ -218,7 +218,8 @@
     albumInput: document.getElementById('albumInput'),
     audioInput: document.getElementById('audioInput'),
     captureStatus: document.getElementById('captureStatus'),
-    clipRow: document.getElementById('clipRow')
+    clipRow: document.getElementById('clipRow'),
+    ocrEngine: document.getElementById('ocrEngine')
   };
 
   var state = {
@@ -890,6 +891,177 @@
     });
   }
 
+  var UMI = {
+    origin: 'http://127.0.0.1:1224'
+  };
+
+  function paintOcrEngine(ok, reason) {
+    if (!els.ocrEngine) return;
+    els.ocrEngine.hidden = false;
+    if (ok) {
+      els.ocrEngine.textContent = '拍照识别：已接上本机 Umi-OCR';
+      els.ocrEngine.classList.remove('is-warn');
+      return;
+    }
+    els.ocrEngine.classList.add('is-warn');
+    if (reason === 'https') {
+      els.ocrEngine.textContent = '拍照识别：HTTPS 页面调不到本机 Umi-OCR。请先打开 Umi-OCR，再用本地 http 打开本页。';
+    } else {
+      els.ocrEngine.textContent = '拍照识别：未接上 Umi-OCR。请先打开 Umi-OCR（端口 1224），再用本机 http 打开本页。';
+    }
+  }
+
+  function probeUmi(done) {
+    if (window.location.protocol === 'https:') {
+      done(false, 'https');
+      return;
+    }
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = setTimeout(function () {
+      if (ctrl) ctrl.abort();
+    }, 1200);
+    fetch(UMI.origin + '/api/ocr/get_options', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (res) {
+      if (!res.ok) throw new Error('bad');
+      return res.json();
+    }).then(function () {
+      clearTimeout(timer);
+      done(true, '');
+    }).catch(function () {
+      clearTimeout(timer);
+      done(false, 'down');
+    });
+  }
+
+  function blobToBase64(blob, done) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var s = String(reader.result || '');
+      var i = s.indexOf(',');
+      done(i >= 0 ? s.slice(i + 1) : s);
+    };
+    reader.onerror = function () { done(''); };
+    reader.readAsDataURL(blob);
+  }
+
+  function shrinkForUmi(file, done) {
+    loadPhotoSource(file, function (source, width, height, release) {
+      if (!source || !width || !height) {
+        release();
+        done(file);
+        return;
+      }
+      var maxEdge = Math.max(width, height);
+      var scale = maxEdge > 2880 ? 2880 / maxEdge : 1;
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+      release();
+      if (canvas.toBlob) {
+        canvas.toBlob(function (blob) { done(blob || file); }, 'image/jpeg', 0.92);
+      } else {
+        done(file);
+      }
+    });
+  }
+
+  function textFromUmi(result) {
+    if (!result) return '';
+    if (result.code === 101) return '';
+    if (result.code !== 100) throw new Error(result.data || 'umi');
+    if (typeof result.data === 'string') return tidyOcr(result.data);
+    if (result.data && result.data.length) {
+      return tidyOcr(result.data.map(function (block) {
+        return String(block.text || '') + (block.end == null ? '\n' : block.end);
+      }).join(''));
+    }
+    return '';
+  }
+
+  function finishOcr(text, prefix) {
+    appendNote(text);
+    var ok = !!(text && text.trim());
+    var msg = ok ? '板书已写入输入框，认错的字可以直接改。' : '这张照片里没认出字，换一张更清楚的再试。';
+    setCaptureStatus((prefix || '') + msg, !ok);
+    state.ocrBusy = false;
+    els.shotBtn.disabled = false;
+    els.albumBtn.disabled = false;
+  }
+
+  function failOcr(message) {
+    setCaptureStatus(message, true);
+    state.ocrBusy = false;
+    els.shotBtn.disabled = false;
+    els.albumBtn.disabled = false;
+  }
+
+  function recognizeTesseract(file, prefix) {
+    ensureTesseract(function (err) {
+      if (err || !window.Tesseract) {
+        failOcr((prefix || '') + '备用识别库没加载成功。请打开本机 Umi-OCR，或把字打进输入框。');
+        return;
+      }
+      setCaptureStatus((prefix || '') + '正在用备用识别…');
+      preprocessPhoto(file, function (blob) {
+        var options = {
+          workerPath: absUrl(OCR.workerPath),
+          corePath: absUrl(OCR.corePath),
+          langPath: absUrl(OCR.langPath),
+          logger: function (msg) {
+            if (!msg) return;
+            if (msg.status === 'recognizing text' && msg.progress != null) {
+              setCaptureStatus(((prefix || '') + '正在用备用识别… ') + Math.round(msg.progress * 100) + '%');
+            }
+          }
+        };
+        var ready = state.ocrWorker ?
+          Promise.resolve(state.ocrWorker) :
+          makeOcrWorker(options);
+        ready.then(function (worker) {
+          state.ocrWorker = worker;
+          return worker.recognize(blob, { rotateAuto: true });
+        }).then(function (result) {
+          finishOcr(textFromOcr(result && result.data), prefix || '');
+        }).catch(function () {
+          failOcr((prefix || '') + '这张照片识别失败，换一张或改用打字。');
+        });
+      });
+    });
+  }
+
+  function recognizeUmi(file, done) {
+    shrinkForUmi(file, function (blob) {
+      blobToBase64(blob, function (b64) {
+        if (!b64) {
+          done(new Error('empty'));
+          return;
+        }
+        fetch(UMI.origin + '/api/ocr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            base64: b64,
+            options: {
+              'data.format': 'text',
+              'tbpu.parser': 'multi_line'
+            }
+          })
+        }).then(function (res) {
+          if (!res.ok) throw new Error('http');
+          return res.json();
+        }).then(function (result) {
+          done(null, textFromUmi(result));
+        }).catch(function (err) {
+          done(err || new Error('umi'));
+        });
+      });
+    });
+  }
+
   function readPhoto(file) {
     if (!file || !file.type || file.type.indexOf('image/') !== 0) {
       setCaptureStatus('请选一张板书或笔记照片。', true);
@@ -901,50 +1073,24 @@
     els.albumBtn.disabled = true;
     var preview = URL.createObjectURL(file);
     addClip('image', file, preview);
-    setCaptureStatus('正在处理照片…');
-    ensureTesseract(function (err) {
-      if (err || !window.Tesseract) {
-        state.ocrBusy = false;
-        els.shotBtn.disabled = false;
-        els.albumBtn.disabled = false;
-        setCaptureStatus('识别库没加载成功。可检查网络，或把字打进输入框。', true);
+    setCaptureStatus('正在查找本机 Umi-OCR…');
+    probeUmi(function (ok, reason) {
+      paintOcrEngine(ok, reason);
+      if (ok) {
+        setCaptureStatus('正在用本机 Umi-OCR 识别…');
+        recognizeUmi(file, function (err, text) {
+          if (err) {
+            recognizeTesseract(file, 'Umi-OCR 这次没认出，改用备用识别。');
+            return;
+          }
+          finishOcr(text);
+        });
         return;
       }
-      preprocessPhoto(file, function (blob) {
-        setCaptureStatus('正在识别板书…');
-        var options = {
-          workerPath: absUrl(OCR.workerPath),
-          corePath: absUrl(OCR.corePath),
-          langPath: absUrl(OCR.langPath),
-          logger: function (msg) {
-            if (!msg) return;
-            if (msg.status === 'recognizing text' && msg.progress != null) {
-              setCaptureStatus('正在识别板书… ' + Math.round(msg.progress * 100) + '%');
-            } else if (msg.status && msg.status.indexOf('download') !== -1) {
-              setCaptureStatus('正在加载中英文字库…');
-            }
-          }
-        };
-        var ready = state.ocrWorker ?
-          Promise.resolve(state.ocrWorker) :
-          makeOcrWorker(options);
-        ready.then(function (worker) {
-          state.ocrWorker = worker;
-          return worker.recognize(blob, { rotateAuto: true });
-        }).then(function (result) {
-          var text = textFromOcr(result && result.data);
-          appendNote(text);
-          setCaptureStatus(text && text.trim() ?
-            '板书已写入输入框，认错的字可以直接改。' :
-            '这张照片里没认出字，换一张更清楚的再试。', !text || !text.trim());
-        }).catch(function () {
-          setCaptureStatus('这张照片识别失败，换一张或改用打字。', true);
-        }).then(function () {
-          state.ocrBusy = false;
-          els.shotBtn.disabled = false;
-          els.albumBtn.disabled = false;
-        });
-      });
+      var prefix = reason === 'https' ?
+        'HTTPS 页面调不到本机 Umi-OCR，暂用备用识别。' :
+        '未接上本机 Umi-OCR，暂用备用识别。';
+      recognizeTesseract(file, prefix);
     });
   }
 
@@ -1102,4 +1248,5 @@
   paintSamples();
   refreshArchive();
   selectSample('calc');
+  probeUmi(paintOcrEngine);
 })();
